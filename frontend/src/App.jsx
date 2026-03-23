@@ -1,120 +1,123 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useNobarSocket } from "./hooks/useNobarSocket";
-import { parseVideoUrl, generateRoomId, formatTime } from "./utils/videoUtils";
+import { parseVideoUrl, generateRoomId } from "./utils/videoUtils";
 import YouTubePlayer from "./components/YouTubePlayer";
 import DirectPlayer from "./components/DirectPlayer";
 import Chat from "./components/Chat";
 import "./App.css";
 
 const WS_URL = import.meta.env.VITE_WS_URL || "wss://your-server.railway.app";
-const SYNC_THRESHOLD = 2.5; // seconds drift before re-sync
+const SYNC_THRESHOLD = 2.5;
 
 export default function App() {
-  // Room state
-  const [screen, setScreen] = useState("lobby"); // lobby | room
+  const [screen, setScreen] = useState("lobby");
   const [roomId, setRoomId] = useState("");
   const [nameInput, setNameInput] = useState("");
   const [roomInput, setRoomInput] = useState("");
   const [myName, setMyName] = useState("");
   const [isHost, setIsHost] = useState(false);
   const [users, setUsers] = useState([]);
-
-  // Video state
-  const [videoInfo, setVideoInfo] = useState(null); // { type, embedUrl, original }
+  const [videoInfo, setVideoInfo] = useState(null);
   const [urlInput, setUrlInput] = useState("");
   const [urlError, setUrlError] = useState("");
-
-  // Chat
   const [messages, setMessages] = useState([]);
 
-  // Player ref
   const playerRef = useRef(null);
   const isHostRef = useRef(false);
-  const pendingSyncRef = useRef(null); // { currentTime, playing } to apply when player ready
+  const pendingSyncRef = useRef(null);
   const playerReadyRef = useRef(false);
   const heartbeatRef = useRef(null);
+  const sendRef = useRef(null);
 
   isHostRef.current = isHost;
 
-  const addSystemMsg = (text) => setMessages((m) => [...m, { type: "system", text }]);
+  const addSystemMsg = useCallback((text) => {
+    setMessages((m) => [...m, { type: "system", text }]);
+  }, []);
+
+  const applySync = useCallback((currentTime, playing) => {
+    if (!playerReadyRef.current) {
+      pendingSyncRef.current = { currentTime, playing };
+      return;
+    }
+    const player = playerRef.current;
+    if (!player) return;
+    const ct = player.getCurrentTime();
+    if (Math.abs(ct - currentTime) > SYNC_THRESHOLD) {
+      player.seekTo(currentTime);
+    }
+    if (playing) player.play();
+    else player.pause();
+  }, []);
+
+  const handleMessage = useCallback((msg) => {
+    const send = sendRef.current;
+    switch (msg.type) {
+      case "joined": {
+        setIsHost(msg.isHost);
+        isHostRef.current = msg.isHost;
+        if (msg.state?.videoUrl) {
+          const info = parseVideoUrl(msg.state.videoUrl);
+          setVideoInfo(info);
+          pendingSyncRef.current = {
+            currentTime: msg.state.currentTime,
+            playing: msg.state.playing,
+          };
+        }
+        break;
+      }
+      case "users":
+        setUsers(msg.users);
+        break;
+      case "promoted_host":
+        setIsHost(true);
+        isHostRef.current = true;
+        addSystemMsg("👑 Kamu sekarang jadi host!");
+        break;
+      case "user_joined":
+        addSystemMsg(`👋 ${msg.name} bergabung`);
+        break;
+      case "user_left":
+        addSystemMsg(`👋 ${msg.name} keluar`);
+        break;
+      case "load_video": {
+        const info = parseVideoUrl(msg.url);
+        setVideoInfo(info);
+        playerReadyRef.current = false;
+        addSystemMsg(`🎬 ${msg.by} memutar video baru`);
+        break;
+      }
+      case "play":
+        if (!isHostRef.current) applySync(msg.currentTime, true);
+        break;
+      case "pause":
+        if (!isHostRef.current) applySync(msg.currentTime, false);
+        break;
+      case "seek":
+        if (!isHostRef.current) playerRef.current?.seekTo(msg.currentTime);
+        break;
+      case "sync":
+        applySync(msg.currentTime, msg.playing);
+        break;
+      case "sync_request":
+        if (isHostRef.current && send) {
+          const ct = playerRef.current?.getCurrentTime() ?? 0;
+          send({ type: "sync_response", requesterId: msg.requesterId, currentTime: ct });
+        }
+        break;
+      case "chat":
+        setMessages((m) => [...m, { name: msg.name, text: msg.text }]);
+        break;
+      default:
+        break;
+    }
+  }, [addSystemMsg, applySync]);
 
   const { send, connected } = useNobarSocket(screen === "room" ? WS_URL : null, {
-    onMessage: useCallback(
-      (msg) => {
-        switch (msg.type) {
-          case "joined": {
-            setIsHost(msg.isHost);
-            isHostRef.current = msg.isHost;
-            if (msg.state?.videoUrl) {
-              const info = parseVideoUrl(msg.state.videoUrl);
-              setVideoInfo(info);
-              pendingSyncRef.current = {
-                currentTime: msg.state.currentTime,
-                playing: msg.state.playing,
-              };
-            }
-            break;
-          }
-          case "users":
-            setUsers(msg.users);
-            break;
-          case "promoted_host":
-            setIsHost(true);
-            isHostRef.current = true;
-            addSystemMsg("👑 Kamu sekarang jadi host!");
-            break;
-          case "user_joined":
-            addSystemMsg(`👋 ${msg.name} bergabung`);
-            break;
-          case "user_left":
-            addSystemMsg(`👋 ${msg.name} keluar`);
-            break;
-          case "load_video": {
-            const info = parseVideoUrl(msg.url);
-            setVideoInfo(info);
-            playerReadyRef.current = false;
-            addSystemMsg(`🎬 ${msg.by} memutar video baru`);
-            break;
-          }
-          case "play": {
-            if (!isHostRef.current) {
-              applySync(msg.currentTime, true);
-            }
-            break;
-          }
-          case "pause": {
-            if (!isHostRef.current) {
-              applySync(msg.currentTime, false);
-            }
-            break;
-          }
-          case "seek": {
-            if (!isHostRef.current) {
-              playerRef.current?.seekTo(msg.currentTime);
-            }
-            break;
-          }
-          case "sync": {
-            applySync(msg.currentTime, msg.playing);
-            break;
-          }
-          case "sync_request": {
-            // Host replies with current time
-            if (isHostRef.current) {
-              const ct = playerRef.current?.getCurrentTime() ?? 0;
-              send({ type: "sync_response", requesterId: msg.requesterId, currentTime: ct });
-            }
-            break;
-          }
-          case "chat": {
-            setMessages((m) => [...m, { name: msg.name, text: msg.text }]);
-            break;
-          }
-        }
-      },
-      [send] // eslint-disable-line
-    ),
+    onMessage: handleMessage,
   });
+
+  sendRef.current = send;
 
   function applySync(currentTime, playing) {
     if (!playerReadyRef.current) {
@@ -193,7 +196,7 @@ export default function App() {
     if (!isHostRef.current) {
       send({ type: "request_sync" });
     }
-  }, [send]); // eslint-disable-line
+  }, [send, applySync]);
 
   function sendChat(text) {
     setMessages((m) => [...m, { name: myName, text }]);
