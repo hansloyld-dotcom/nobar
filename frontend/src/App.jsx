@@ -6,7 +6,7 @@ import DirectPlayer from "./components/DirectPlayer";
 import Chat from "./components/Chat";
 import "./App.css";
 
-const WS_URL = import.meta.env.VITE_WS_URL || "wss://your-server.railway.app";
+const WS_URL = "wss://nobar-production.up.railway.app";
 const SYNC_THRESHOLD = 2.5;
 
 export default function App() {
@@ -119,6 +119,22 @@ export default function App() {
 
   sendRef.current = send;
 
+  function applySync(currentTime, playing) {
+    if (!playerReadyRef.current) {
+      pendingSyncRef.current = { currentTime, playing };
+      return;
+    }
+    const player = playerRef.current;
+    if (!player) return;
+    const ct = player.getCurrentTime();
+    if (Math.abs(ct - currentTime) > SYNC_THRESHOLD) {
+      player.seekTo(currentTime);
+    }
+    if (playing) player.play();
+    else player.pause();
+  }
+
+  // Host heartbeat
   useEffect(() => {
     if (!isHost || screen !== "room") return;
     heartbeatRef.current = setInterval(() => {
@@ -132,6 +148,7 @@ export default function App() {
     return () => clearInterval(heartbeatRef.current);
   }, [isHost, screen, send]);
 
+  // Join room
   function handleJoin(asHost) {
     const name = nameInput.trim();
     if (!name) return;
@@ -143,6 +160,7 @@ export default function App() {
     setTimeout(() => send({ type: "join", roomId: rid, name }), 300);
   }
 
+  // Load video
   function handleLoadVideo() {
     const info = parseVideoUrl(urlInput.trim());
     if (!info) {
@@ -154,14 +172,19 @@ export default function App() {
     setUrlInput("");
   }
 
-  const onHostStateChange = useCallback((ytState) => {
-    if (!isHostRef.current) return;
-    if (ytState === 1) {
-      send({ type: "play", currentTime: playerRef.current?.getCurrentTime() });
-    } else if (ytState === 2) {
-      send({ type: "pause", currentTime: playerRef.current?.getCurrentTime() });
-    }
-  }, [send]);
+  // Host playback controls — called when host interacts with player
+  const onHostStateChange = useCallback(
+    (ytState) => {
+      if (!isHostRef.current) return;
+      // YT states: -1=unstarted, 0=ended, 1=playing, 2=paused, 3=buffering, 5=cued
+      if (ytState === 1) {
+        send({ type: "play", currentTime: playerRef.current?.getCurrentTime() });
+      } else if (ytState === 2) {
+        send({ type: "pause", currentTime: playerRef.current?.getCurrentTime() });
+      }
+    },
+    [send]
+  );
 
   const onPlayerReady = useCallback(() => {
     playerReadyRef.current = true;
@@ -180,6 +203,7 @@ export default function App() {
     send({ type: "chat", name: myName, text });
   }
 
+  // LOBBY SCREEN
   if (screen === "lobby") {
     return (
       <div className="lobby">
@@ -222,8 +246,10 @@ export default function App() {
     );
   }
 
+  // ROOM SCREEN
   return (
     <div className="room-layout">
+      {/* Header */}
       <header className="room-header">
         <div className="room-header-left">
           <span className="logo-small">🎬 Nobar</span>
@@ -242,6 +268,7 @@ export default function App() {
       </header>
 
       <div className="room-body">
+        {/* Video area */}
         <div className="video-area">
           <div className="video-wrapper">
             {!videoInfo ? (
@@ -265,6 +292,7 @@ export default function App() {
             )}
           </div>
 
+          {/* URL input */}
           <div className="url-bar">
             <input
               className="input url-input"
@@ -279,6 +307,7 @@ export default function App() {
           </div>
           {urlError && <p className="url-error">{urlError}</p>}
 
+          {/* Non-host sync button */}
           {!isHost && videoInfo && (
             <button className="btn-sync" onClick={() => send({ type: "request_sync" })}>
               🔄 Sync ke Host
@@ -286,7 +315,9 @@ export default function App() {
           )}
         </div>
 
+        {/* Sidebar */}
         <div className="sidebar">
+          {/* Users */}
           <div className="users-panel">
             <div className="panel-title">👥 Penonton ({users.length})</div>
             <div className="users-list">
@@ -300,6 +331,8 @@ export default function App() {
               ))}
             </div>
           </div>
+
+          {/* Chat */}
           <Chat messages={messages} onSend={sendChat} myName={myName} />
         </div>
       </div>
