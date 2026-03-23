@@ -1,62 +1,75 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 
-export function useNobarSocket(wsUrl, { onMessage, onOpen, onClose } = {}) {
+export function useNobarSocket(wsUrl, handlers) {
   const wsRef = useRef(null);
   const [connected, setConnected] = useState(false);
-  const [reconnectCount, setReconnectCount] = useState(0);
   const reconnectTimer = useRef(null);
+  const reconnectCount = useRef(0);
   const mountedRef = useRef(true);
+  const handlersRef = useRef(handlers);
+  handlersRef.current = handlers;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const connect = useCallback(() => {
     if (!wsUrl) return;
+    if (wsRef.current) {
+      wsRef.current.onopen = null;
+      wsRef.current.onmessage = null;
+      wsRef.current.onclose = null;
+      wsRef.current.onerror = null;
+      try { wsRef.current.close(); } catch {}
+    }
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 
     ws.onopen = () => {
       if (!mountedRef.current) return;
       setConnected(true);
-      setReconnectCount(0);
-      onOpen?.();
+      reconnectCount.current = 0;
+      handlersRef.current?.onOpen?.();
     };
-
     ws.onmessage = (e) => {
       if (!mountedRef.current) return;
       try {
         const msg = JSON.parse(e.data);
-        onMessage?.(msg);
+        handlersRef.current?.onMessage?.(msg);
       } catch {}
     };
-
     ws.onclose = () => {
       if (!mountedRef.current) return;
       setConnected(false);
-      onClose?.();
-      // Auto reconnect with backoff
-      setReconnectCount((c) => {
-        const delay = Math.min(1000 * 2 ** c, 15000);
-        reconnectTimer.current = setTimeout(connect, delay);
-        return c + 1;
-      });
+      handlersRef.current?.onClose?.();
+      const delay = Math.min(1000 * Math.pow(2, reconnectCount.current), 15000);
+      reconnectCount.current += 1;
+      reconnectTimer.current = setTimeout(connect, delay);
     };
-
-    ws.onerror = () => ws.close();
-  }, [wsUrl]); // eslint-disable-line
+    ws.onerror = () => { try { ws.close(); } catch {} };
+  }, [wsUrl]);
 
   useEffect(() => {
-    mountedRef.current = true;
+    if (!wsUrl) return;
     connect();
     return () => {
-      mountedRef.current = false;
       clearTimeout(reconnectTimer.current);
-      wsRef.current?.close();
+      if (wsRef.current) {
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onclose = null;
+        wsRef.current.onerror = null;
+        try { wsRef.current.close(); } catch {}
+      }
     };
-  }, [connect]);
+  }, [connect, wsUrl]);
 
   const send = useCallback((msg) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
+    if (wsRef.current && wsRef.current.readyState === 1) {
       wsRef.current.send(JSON.stringify(msg));
     }
   }, []);
 
-  return { send, connected, reconnectCount };
+  return { send, connected };
 }
